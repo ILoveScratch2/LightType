@@ -60,7 +60,22 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-      - name: Upload
+      - name: Prepare source package
+        if: github.event_name == 'push'
+        run: |
+          node scripts/build.js
+          
+      - name: Create source package (Windows)
+        if: github.event_name == 'push' && matrix.platform == 'windows-latest'
+        run: Compress-Archive -Path dist\* -DestinationPath srcpack.zip
+        shell: pwsh
+
+      - name: Create source package (Unix)
+        if: github.event_name == 'push' && matrix.platform != 'windows-latest'
+        run: cd dist && zip -r ../srcpack.zip . && cd ..
+        shell: bash
+
+      - name: Upload Artifacts
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
@@ -68,3 +83,53 @@ jobs:
           path: |
             src-tauri/target/release/bundle/
             src-tauri/target/universal-apple-darwin/release/bundle/
+            srcpack.zip
+
+  create-prerelease:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Delete existing dev-build tag and release
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete dev-build --yes || true
+          git push --delete origin dev-build || true
+      
+      - name: Create dev-build tag
+        run: |
+          git tag -f dev-build
+          git push -f origin dev-build
+      
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.app" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "srcpack.zip" \) -exec cp {} release-files/ \;
+          ls -lah release-files/
+      
+      - name: Create Pre-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create dev-build \
+            --title "Development Build" \
+            --notes "这是一个基于 \`main\` 分支最新代码的自动版本。
+          Commit SHA: ${{ github.sha }}
+          
+          提示：
+           - 此版本为开发测试版，可能包含不稳定的功能或未知的错误。
+           - 不建议用于生产环境或正式用途。" \
+            --prerelease \
+            release-files/*
